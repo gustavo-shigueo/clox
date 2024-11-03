@@ -1,6 +1,6 @@
 build:
-	gcc -o ./bin/lox.exe ./src/*.c
+	gcc -o ./bin/lox ./src/*.c
 
 run:
-	gcc -o ./bin/lox.exe ./src/*.c
-	.\bin\lox.exe
+	gcc -o ./bin/lox ./src/*.c
+	./bin/lox
