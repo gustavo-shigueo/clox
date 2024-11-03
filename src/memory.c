@@ -1,4 +1,5 @@
 #include "memory.h"
+#include "chunk.h"
 #include "object.h"
 #include "value.h"
 #include "vm.h"
@@ -10,6 +11,13 @@ static void freeObject(Object *object) {
     case OBJ_STRING: {
       ObjString *string = (ObjString *)object;
       FREE_STRING(string, string->length);
+      break;
+    }
+
+    case OBJ_FUNCTION: {
+      ObjFunction *function = (ObjFunction *)object;
+      freeChunk(&function->chunk);
+      FREE(ObjFunction, object);
       break;
     }
   }
