@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 
 #ifdef DEBUG_PRINT_CODE
 #include "debug.h"
@@ -46,6 +47,7 @@ typedef enum {
 } FunctionType;
 
 typedef struct {
+  struct Compiler *enclosing;
   ObjFunction *function;
   FunctionType type;
 
@@ -201,6 +203,7 @@ static void patchJump(size_t offset) {
 }
 
 static void initCompiler(Compiler *compiler, FunctionType type) {
+  compiler->enclosing = (struct Compiler *)current;
   compiler->function = NULL;
   compiler->type = type;
   compiler->localCount = 0;
@@ -209,6 +212,13 @@ static void initCompiler(Compiler *compiler, FunctionType type) {
   compiler->locals = malloc(sizeof(Local) * UINT16_MAX);
   compiler->function = newFunction();
   current = compiler;
+
+  if (type != TYPE_SCRIPT) {
+    current->function->name = copyString(
+      parser.previous.start,
+      parser.previous.length
+    );
+  }
 
   Local *local = &current->locals[current->localCount++];
   local->depth = 0;
@@ -220,16 +230,19 @@ static ParseRule *getRule(TokenType type);
 static void parsePrecedence(Precedence precedence);
 static void expression();
 static void declaration();
+static void funDeclaration();
 static void varDeclaration();
 static void statement();
 static void printStatement();
 static void ifStatement();
+static void returnStatement();
 static void whileStatement();
 static void forStatement();
 static void continueStatement();
 static void block();
 static void expressionStatement();
 static void grouping(bool canAssign);
+static void call(bool canAssign);
 static void unary(bool canAssign);
 static void ternary(bool canAssign);
 static void binary(bool canAssign);
@@ -240,8 +253,11 @@ static void string(bool canAssign);
 static void literal(bool canAssign);
 static void variable(bool canAssign);
 
+static ObjFunction *endCompiler();
+static void emitReturn();
+
 ParseRule rules[] = {
-    [TOKEN_LEFT_PAREN] = {grouping, NULL, PREC_NONE},
+    [TOKEN_LEFT_PAREN] = {grouping, call, PREC_CALL},
     [TOKEN_RIGHT_PAREN] = {NULL, NULL, PREC_NONE},
     [TOKEN_LEFT_BRACE] = {NULL, NULL, PREC_NONE},
     [TOKEN_RIGHT_BRACE] = {NULL, NULL, PREC_NONE},
@@ -381,6 +397,10 @@ static bool identifiersEqual(const Token *a, const Token *b) {
 }
 
 static void markInitialized() {
+  if (current->scopeDepth == 0) {
+    return;
+  }
+
   current->locals[current->localCount - 1].depth = current->scopeDepth;
 }
 
@@ -400,7 +420,6 @@ static uint16_t resolveLocal(Compiler *compiler, Token *name) {
 }
 
 static void addLocal(Token name) {
-  printf("%c %d\n", name.start[0], current->scopeDepth);
   if (current->localCount == UINT16_COUNT) {
     error("Too many local variables in function");
     return;
@@ -488,7 +507,9 @@ static void synchronyze() {
 static void expression() { parsePrecedence(PREC_ASSIGNMENT); }
 
 static void declaration() {
-  if (match(TOKEN_VAR)) {
+  if (match(TOKEN_FUN)) {
+    funDeclaration();
+  } else if (match(TOKEN_VAR)) {
     varDeclaration();
   } else {
     statement();
@@ -497,6 +518,42 @@ static void declaration() {
   if (parser.panicMode) {
     synchronyze();
   }
+}
+
+static void function(FunctionType type) {
+  Compiler compiler;
+  initCompiler(&compiler, type);
+
+  beginScope();
+
+  consume(TOKEN_LEFT_PAREN, "Expected '(' after function name.");
+
+  if (!check(TOKEN_RIGHT_PAREN)) {
+    do {
+      current->function->arity++;
+
+      if (current->function->arity > 255) {
+        errorAtCurrent("Can't have more than 255 parameters");
+      }
+
+      uint16_t constant = parseVariable("Expected parameter name.");
+      defineVariable(constant);
+    } while(match(TOKEN_COMMA));
+  }
+  
+  consume(TOKEN_RIGHT_PAREN, "Expected ')' after function parameters.");
+  consume(TOKEN_LEFT_BRACE, "Expected '{' before function body.");
+  block();
+
+  ObjFunction *function = endCompiler();
+  emitConstant(OBJ_VAL(function));
+}
+
+static void funDeclaration() {
+  uint16_t global = parseVariable("Expected function name.");
+  markInitialized();
+  function(TYPE_FUNCTION);
+  defineVariable(global);
 }
 
 static void varDeclaration() {
@@ -518,6 +575,8 @@ static void statement() {
     printStatement();
   } else if (match(TOKEN_IF)) {
     ifStatement();
+  } else if (match(TOKEN_RETURN)) {
+    returnStatement();
   } else if (match(TOKEN_WHILE)) {
     whileStatement();
   } else if (match(TOKEN_FOR)) {
@@ -559,6 +618,20 @@ static void ifStatement() {
   }
 
   patchJump(elseJump);
+}
+
+static void returnStatement() {
+  if (current->type == TYPE_SCRIPT) {
+    error("Can't return from top-level code.");
+  }
+
+  if (match(TOKEN_SEMICOLON)) {
+    emitReturn();
+  } else {
+    expression();
+    consume(TOKEN_SEMICOLON, "Expect ';' after return value.");
+    emitByte(OP_RETURN);
+  }
 }
 
 static void whileStatement() {
@@ -741,6 +814,31 @@ static void number(bool canAssign) {
   emitConstant(value);
 }
 
+static uint8_t argumentList() {
+  uint8_t argumentCount = 0;
+
+  if (!check(TOKEN_RIGHT_PAREN)) {
+    do {
+      expression();
+
+      if (argumentCount == 255) {
+        error("Can't have more than 255 arguments.");
+      }
+
+      argumentCount++;
+    } while (match(TOKEN_COMMA));
+  }
+
+  consume(TOKEN_RIGHT_PAREN, "Expected ')' after arguments");
+
+  return argumentCount;
+}
+
+static void call(bool canAssign) {
+  uint8_t argumentCount = argumentList();
+  emitBytes(OP_CALL, argumentCount);
+}
+
 static void unary(bool canAssign) {
   TokenType operatorType = parser.previous.type;
 
@@ -835,7 +933,10 @@ static void or_(bool canAssign) {
   patchJump(endJump);
 }
 
-static void emitReturn() { emitByte(OP_RETURN); }
+static void emitReturn() {
+  emitByte(OP_NIL);
+  emitByte(OP_RETURN);
+}
 
 static ObjFunction *endCompiler() {
   emitReturn();
@@ -852,6 +953,7 @@ static ObjFunction *endCompiler() {
   }
 #endif
 
+  current = (Compiler *)current->enclosing;
   return function;
 }
 

@@ -8,7 +8,7 @@
 
 #define UINT16_COUNT (UINT16_MAX + 1)
 
-#define DEBUG_PRINT_CODE
-#define DEBUG_TRACE_EXECUTION
+/*#define DEBUG_PRINT_CODE*/
+/*#define DEBUG_TRACE_EXECUTION*/
 
 #endif // !clox_common_h

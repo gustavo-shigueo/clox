@@ -8,14 +8,20 @@
 #include "value.h"
 
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef DEBUG_TRACE_EXECUTION
 #include "debug.h"
 #endif
 
 VM vm;
+
+static Value clockNative(uint32_t argumentCount, Value* args) {
+  return NUMBER_VAL((double)clock() / CLOCKS_PER_SEC);
+}
 
 static void resetStack() {
   vm.stackTop = vm.stack;
@@ -29,11 +35,28 @@ static void runtimeError(const char *format, ...) {
   va_end(args);
   fputs("\n", stderr);
 
-  CallFrame *frame = &vm.frames[vm.frameCount - 1];
-  size_t instruction = frame->instructionPointer - frame->function->chunk.code - 1;
-  uint32_t line = getLine(&frame->function->chunk.lines, instruction);
-  fprintf(stderr, "[line %d] in script\n", line);
+  for (uint32_t i = vm.frameCount - 1; i >= 0; i--) {
+    CallFrame *frame = &vm.frames[i];
+    ObjFunction *function = frame->function;
+    size_t instruction = frame->instructionPointer - function->chunk.code - 1;
+
+    fprintf(stderr, "[line %d] in ", getLine(&function->chunk.lines, instruction));
+    if (function->name == NULL) {
+      fprintf(stderr, "script\n");
+    } else {
+      fprintf(stderr, "%s()\n", function->name->chars);
+    }
+  }
+
   resetStack();
+}
+
+static void defineNative(const char* name, NativeFn function) {
+  push(OBJ_VAL(copyString(name, (int)strlen(name))));
+  push(OBJ_VAL(newNative(function)));
+  tableSet(&vm.globals, AS_STRING(vm.stack[0]), vm.stack[1]);
+  pop();
+  pop();
 }
 
 void initVM() {
@@ -41,6 +64,8 @@ void initVM() {
   vm.objects = NULL;
   initTable(&vm.strings);
   initTable(&vm.globals);
+
+  defineNative("clock", clockNative);
 }
 
 void freeVM() {
@@ -72,6 +97,52 @@ static bool isTruthy(Value value) {
     default:
       return true;
   }
+}
+
+static bool call(ObjFunction *function, uint8_t argumentCount) {
+  if (function->arity != argumentCount) {
+    runtimeError(
+      "Expected %d arguments but got %d.",
+      function->arity,
+      argumentCount
+    );
+
+    return false;
+  }
+
+  if (vm.frameCount == FRAMES_MAX) {
+    runtimeError("Stack overflow.");
+    return false;
+  }
+
+  CallFrame *frame = &vm.frames[vm.frameCount++];
+  frame->function = function;
+  frame->instructionPointer = function->chunk.code;
+  frame->slots = vm.stackTop - argumentCount - 1;
+
+  return true;
+}
+
+static bool callValue(Value callee, uint8_t argumentCount) {
+  if (IS_OBJ(callee)) {
+    switch (OBJ_TYPE(callee)) {
+      case OBJ_FUNCTION:
+        return call(AS_FUNCTION(callee), argumentCount);
+
+      case OBJ_NATIVE:
+        NativeFn native = AS_NATIVE(callee);
+        Value result = native(argumentCount, vm.stackTop - argumentCount);
+        vm.stackTop -= argumentCount + 1;
+        push(result);
+        return true;
+
+      default:
+        break;
+    }
+  }
+
+  runtimeError("Can only call functions and classes.");
+  return false;
 }
 
 InterpretResult run() {
@@ -119,8 +190,32 @@ InterpretResult run() {
     uint8_t instruction;
 
     switch (instruction = READ_BYTE()) {
-      case OP_RETURN:
-        return INTERPRET_OK;
+      case OP_CALL: {
+        uint8_t argumentCount = READ_BYTE();
+
+        if (!callValue(peek(argumentCount), argumentCount)) {
+          return INTERPRET_RUNTIME_ERROR;
+        }
+
+        frame = &vm.frames[vm.frameCount - 1];
+
+        break;
+      }
+
+      case OP_RETURN: {
+        Value value = pop();
+        vm.frameCount--;
+
+        if (vm.frameCount == 0) {
+          pop();
+          return INTERPRET_OK;
+        }
+
+        vm.stackTop = frame->slots;
+        push(value);
+        frame = &vm.frames[vm.frameCount - 1];
+        break;
+      }
 
       case OP_CONSTANT: {
         Value constant = READ_CONSTANT();
@@ -384,10 +479,7 @@ InterpretResult interpret(const char *source) {
   }
 
   push(OBJ_VAL(function));
-  CallFrame *frame = &vm.frames[vm.frameCount++];
-  frame->function = function;
-  frame->instructionPointer = function->chunk.code;
-  frame->slots = vm.stack;
+  call(function, 0);
 
   return run();
 }

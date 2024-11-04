@@ -1,5 +1,4 @@
 #include "chunk.h"
-#include "common.h"
 #include "line.h"
 #include "memory.h"
 #include "value.h"

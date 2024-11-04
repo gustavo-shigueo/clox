@@ -89,6 +89,9 @@ size_t disassembleInstruction(Chunk *chunk, size_t offset) {
     case OP_RETURN:
       return simpleInstruction("OP_RETURN", offset);
 
+    case OP_CALL:
+      return oneByteInstruction("OP_CALL", chunk, offset);
+
     case OP_NEGATE:
       return simpleInstruction("OP_NEGATE", offset);
 

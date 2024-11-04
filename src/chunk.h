@@ -51,6 +51,7 @@ typedef enum {
   OP_POP,
   OP_POPN,
 
+  OP_CALL,
   OP_RETURN,
 } OpCode;
 
