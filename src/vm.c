@@ -35,8 +35,8 @@ static void runtimeError(const char *format, ...) {
   va_end(args);
   fputs("\n", stderr);
 
-  for (uint32_t i = vm.frameCount - 1; i >= 0; i--) {
-    CallFrame *frame = &vm.frames[i];
+  for (uint32_t i = vm.frameCount; i > 0; i--) {
+    CallFrame *frame = &vm.frames[i - 1];
     ObjFunction *function = frame->function;
     size_t instruction = frame->instructionPointer - function->chunk.code - 1;
 
@@ -51,9 +51,9 @@ static void runtimeError(const char *format, ...) {
   resetStack();
 }
 
-static void defineNative(const char* name, NativeFn function) {
+static void defineNative(const char* name, NativeFn function, uint32_t arity) {
   push(OBJ_VAL(copyString(name, (int)strlen(name))));
-  push(OBJ_VAL(newNative(function)));
+  push(OBJ_VAL(newNative(function, arity)));
   tableSet(&vm.globals, AS_STRING(vm.stack[0]), vm.stack[1]);
   pop();
   pop();
@@ -65,7 +65,7 @@ void initVM() {
   initTable(&vm.strings);
   initTable(&vm.globals);
 
-  defineNative("clock", clockNative);
+  defineNative("clock", clockNative, 0);
 }
 
 void freeVM() {
@@ -129,12 +129,24 @@ static bool callValue(Value callee, uint8_t argumentCount) {
       case OBJ_FUNCTION:
         return call(AS_FUNCTION(callee), argumentCount);
 
-      case OBJ_NATIVE:
-        NativeFn native = AS_NATIVE(callee);
-        Value result = native(argumentCount, vm.stackTop - argumentCount);
+      case OBJ_NATIVE: {
+        ObjNative *native = AS_NATIVE(callee);
+
+        if (native->arity != argumentCount) {
+          runtimeError(
+            "Expected %d arguments but got %d.",
+            native->arity,
+            argumentCount
+          );
+
+          return false;
+        }
+
+        Value result = native->function(argumentCount, vm.stackTop - argumentCount);
         vm.stackTop -= argumentCount + 1;
         push(result);
         return true;
+      }
 
       default:
         break;
