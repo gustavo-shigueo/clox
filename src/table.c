@@ -40,7 +40,7 @@ static void adjustCapacity(Table *table, uint32_t capacity) {
     entries[i].value = NIL_VAL;
   }
 
-  table->capacity = 0;
+  table->count = 0;
   uint32_t oldCapacity = table->capacity;
   Entry *oldEntries = table->entries;
 
