@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/types.h>
 
 #ifdef DEBUG_PRINT_CODE
@@ -39,20 +40,27 @@ typedef struct {
 typedef struct {
   Token name;
   int32_t depth;
+  bool isCaptured;
 } Local;
+
+typedef struct {
+  uint16_t index;
+  bool isLocal;
+} Upvalue;
 
 typedef enum {
   TYPE_FUNCTION,
   TYPE_SCRIPT,
 } FunctionType;
 
-typedef struct {
-  struct Compiler *enclosing;
+typedef struct _Compiler {
+  struct _Compiler *enclosing;
   ObjFunction *function;
   FunctionType type;
 
   Local *locals;
   uint32_t localCount;
+  Upvalue upvalues[UINT16_COUNT];
   int32_t scopeDepth;
   int32_t loopStart;
   uint32_t loopDepth;
@@ -203,7 +211,7 @@ static void patchJump(size_t offset) {
 }
 
 static void initCompiler(Compiler *compiler, FunctionType type) {
-  compiler->enclosing = (struct Compiler *)current;
+  compiler->enclosing = current;
   compiler->function = NULL;
   compiler->type = type;
   compiler->localCount = 0;
@@ -224,6 +232,7 @@ static void initCompiler(Compiler *compiler, FunctionType type) {
   local->depth = 0;
   local->name.start = "";
   local->name.length = 0;
+  local->isCaptured = false;
 }
 
 static ParseRule *getRule(TokenType type);
@@ -337,10 +346,46 @@ static void endScope() {
   int32_t scopeDepth = current->scopeDepth;
 
   uint8_t popCount = 0;
-  while (current->localCount > 0 &&
-         locals[current->localCount - 1].depth > scopeDepth) {
-    ++popCount;
-    --current->localCount;
+  while (
+    current->localCount > 0 &&
+    locals[current->localCount - 1].depth > scopeDepth
+  ) {
+    bool isCaptured = current->locals[current->localCount - 1].isCaptured;
+
+    if (!isCaptured) {
+      popCount++;
+      current->localCount--;
+      continue;
+    }
+
+    if (popCount == 0) {
+      emitByte(OP_CLOSE_UPVALUE);
+      current->localCount--;
+      continue;
+    }
+
+    if (popCount == 1) {
+      emitByte(OP_POP);
+      emitByte(OP_CLOSE_UPVALUE);
+      current->localCount--;
+      popCount = 0;
+      continue;
+    }
+
+    while (popCount > 0) {
+      if (popCount <= UINT8_MAX) {
+        emitBytes(OP_POPN, popCount);
+        break;
+      }
+
+      emitBytes(OP_POPN, UINT8_MAX);
+      popCount -= UINT8_MAX;
+    }
+
+    emitByte(OP_CLOSE_UPVALUE);
+    popCount = 0;
+
+    current->localCount--;
   }
 
   if (popCount == 0) {
@@ -404,7 +449,7 @@ static void markInitialized() {
   current->locals[current->localCount - 1].depth = current->scopeDepth;
 }
 
-static uint16_t resolveLocal(Compiler *compiler, Token *name) {
+static int32_t resolveLocal(Compiler *compiler, Token *name) {
   Local *locals = compiler->locals;
   for (int32_t i = compiler->localCount - 1; i >= 0; --i) {
     Local *local = locals + i;
@@ -416,7 +461,47 @@ static uint16_t resolveLocal(Compiler *compiler, Token *name) {
     }
   }
 
-  return UINT16_MAX;
+  return -1;
+}
+
+static int32_t addUpvalue(Compiler *compiler, uint16_t index, bool isLocal) {
+  uint32_t upvalueCount = compiler->function->upvalueCount;
+
+  for (uint32_t i = 0; i < upvalueCount; i++) {
+    Upvalue* upvalue = &compiler->upvalues[i];
+    if (upvalue->index == index && upvalue->isLocal == isLocal) {
+      return i;
+    }
+  }
+
+  if (upvalueCount == UINT16_COUNT) {
+    error("Too many closure variables in function.");
+    return 0;
+  }
+
+  compiler->upvalues[upvalueCount].isLocal = isLocal;
+  compiler->upvalues[upvalueCount].index = index;
+
+  return compiler->function->upvalueCount++;
+}
+
+static int32_t resolveUpvalue(Compiler *compiler, Token *name) {
+  if (compiler->enclosing == NULL) {
+    return -1;
+  }
+
+  int32_t local = resolveLocal(compiler->enclosing, name);
+  if (local != -1) {
+    compiler->enclosing->locals[local].isCaptured = true;
+    return addUpvalue(compiler, (uint16_t)local, true);
+  }
+
+  int32_t upvalue = resolveUpvalue(compiler->enclosing, name);
+  if (upvalue != -1) {
+    return addUpvalue(compiler, (uint16_t)upvalue, false);
+  }
+
+  return -1;
 }
 
 static void addLocal(Token name) {
@@ -428,6 +513,7 @@ static void addLocal(Token name) {
   Local *local = &current->locals[current->localCount++];
   local->name = name;
   local->depth = -1;
+  local->isCaptured = false;
 }
 
 static void declareVariable() {
@@ -546,7 +632,25 @@ static void function(FunctionType type) {
   block();
 
   ObjFunction *function = endCompiler();
-  emitConstant(OBJ_VAL(function));
+  uint16_t index = makeConstant(OBJ_VAL(function));
+
+  if (index <= UINT8_MAX) {
+    emitBytes(OP_CLOSURE, index);
+  } else {
+    emitByte(OP_CLOSURE_LONG);
+    emitBytes(index >> 8, index & UINT8_MAX);
+  }
+
+  for (int32_t i = 0; i < function->upvalueCount; i++) {
+    emitByte(compiler.upvalues[i].isLocal ? 1 : 0);
+
+    uint16_t index = compiler.upvalues[i].index;
+    if (index <= UINT8_MAX) {
+      emitBytes(0, index);
+    } else {
+      emitBytes(index >> 8, index & UINT8_MAX);
+    }
+  }
 }
 
 static void funDeclaration() {
@@ -771,19 +875,24 @@ static void string(bool canAssign) {
 
 static void namedVariable(Token name, bool canAssign) {
   OpCode getOp, getLongOp, setOp, setLongOp;
-  uint16_t index = resolveLocal(current, &name);
+  int32_t index = resolveLocal(current, &name);
 
-  if (index == UINT16_MAX) {
+  if (index != -1) {
+    getOp = OP_GET_LOCAL;
+    getLongOp = OP_GET_LOCAL_LONG;
+    setOp = OP_SET_LOCAL;
+    setLongOp = OP_SET_LOCAL_LONG;
+  } else if ((index = resolveUpvalue(current, &name)) != -1) {
+    getOp = OP_GET_UPVALUE;
+    getLongOp = OP_GET_UPVALUE_LONG;
+    setOp = OP_SET_UPVALUE;
+    setLongOp = OP_SET_UPVALUE_LONG;
+  } else {
     index = identifierConstant(&name);
     getOp = OP_GET_GLOBAL;
     getLongOp = OP_GET_GLOBAL_LONG;
     setOp = OP_SET_GLOBAL;
     setLongOp = OP_SET_GLOBAL_LONG;
-  } else {
-    getOp = OP_GET_LOCAL;
-    getLongOp = OP_GET_LOCAL_LONG;
-    setOp = OP_SET_LOCAL;
-    setLongOp = OP_SET_LOCAL_LONG;
   }
 
   if (canAssign && match(TOKEN_EQUAL)) {
@@ -953,7 +1062,7 @@ static ObjFunction *endCompiler() {
   }
 #endif
 
-  current = (Compiler *)current->enclosing;
+  current = current->enclosing;
   return function;
 }
 

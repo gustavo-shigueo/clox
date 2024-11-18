@@ -1,7 +1,9 @@
 #include "debug.h"
 #include "chunk.h"
 #include "line.h"
+#include "object.h"
 #include "value.h"
+#include <stdint.h>
 #include <stdio.h>
 
 void disassembleChunk(Chunk *chunk, const char *name) {
@@ -92,6 +94,67 @@ size_t disassembleInstruction(Chunk *chunk, size_t offset) {
     case OP_CALL:
       return oneByteInstruction("OP_CALL", chunk, offset);
 
+    case OP_CLOSURE: {
+      offset++;
+
+      uint8_t constant = chunk->code[offset++];
+
+      printf("%-16s %4d ", "OP_CLOSURE", constant);
+      printValue(chunk->constants.values[constant]);
+      printf("\n");
+
+      ObjFunction *function = AS_FUNCTION(chunk->constants.values[constant]);
+      for (int32_t i = 0; i < function->upvalueCount; i++) {
+        uint8_t isLocal = chunk->code[offset++];
+
+        uint16_t index_byte_a = chunk->code[offset++];
+        uint16_t index_byte_b = chunk->code[offset++];
+
+        uint16_t index = (index_byte_a << 8) | index_byte_b;
+
+        printf(
+          "%04zu      |                     %s %d\n",
+          offset - 2,
+          isLocal ? "local" : "upvalue",
+          index
+        );
+      }
+
+      return offset;
+    }
+
+    case OP_CLOSURE_LONG: {
+      offset++;
+
+      uint16_t byte_a = chunk->code[offset++] << 8;
+      uint16_t byte_b = chunk->code[offset++];
+
+      uint16_t constant = (byte_a << 8) | byte_b;
+
+      printf("%-16s %4d ", "OP_CLOSURE", constant);
+      printValue(chunk->constants.values[constant]);
+      printf("\n");
+
+      ObjFunction *function = AS_FUNCTION(chunk->constants.values[constant]);
+      for (int32_t i = 0; i < function->upvalueCount; i++) {
+        uint8_t isLocal = chunk->code[offset++];
+
+        uint16_t index_byte_a = chunk->code[offset++];
+        uint16_t index_byte_b = chunk->code[offset++];
+
+        uint16_t index = (index_byte_a << 8) | index_byte_b;
+
+        printf(
+          "%04zu      |                     %s %d\n",
+          offset - 2,
+          isLocal ? "local" : "upvalue",
+          index
+        );
+      }
+
+      return offset;
+    }
+
     case OP_NEGATE:
       return simpleInstruction("OP_NEGATE", offset);
 
@@ -151,6 +214,21 @@ size_t disassembleInstruction(Chunk *chunk, size_t offset) {
 
     case OP_SET_GLOBAL_LONG:
       return longConstantInstruction("OP_SET_GLOBAL_LONG", chunk, offset);
+
+    case OP_GET_UPVALUE:
+      return oneByteInstruction("OP_GET_UPVALUE", chunk, offset);
+
+    case OP_GET_UPVALUE_LONG:
+      return twoBytesInstruction("OP_GET_UPVALUE_LONG", chunk, offset);
+
+    case OP_SET_UPVALUE:
+      return oneByteInstruction("OP_SET_UPVALUE", chunk, offset);
+
+    case OP_SET_UPVALUE_LONG:
+      return twoBytesInstruction("OP_SET_UPVALUE_LONG", chunk, offset);
+
+    case OP_CLOSE_UPVALUE:
+      return oneByteInstruction("OP_CLOSE_UPVALUE", chunk, offset);
 
     case OP_GET_LOCAL:
       return oneByteInstruction("OP_GET_LOCAL", chunk, offset);
